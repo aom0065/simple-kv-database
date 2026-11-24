@@ -4,11 +4,17 @@
 import time
 import json
 
+from copy import deepcopy
+
 from storage import save_command, load_commands
 
 # In memory database
 # Each entry contains a key and its value
 database = []
+
+# Custom hashes storage using nested lists
+# Each hash contains a name and a list of field value pairs
+hashes = []
 
 def find_entry(key):
     """Find a key, removing ut if it has expired."""
@@ -36,7 +42,7 @@ def set_value(key,value):
         database.append([key, value, None])
 
 def get_value(key):
-    """Retrive a value using its key."""
+    """Retrieve a value using its key."""
 
     entry = find_entry(key)
     return entry[1] if entry is not None else None
@@ -99,6 +105,51 @@ def range_values(start, end):
     keys.sort()
     return keys
 
+def find_hash(hash_name):
+    """Find a hash by name."""
+    for entry in hashes:
+        if entry[0] == hash_name:
+            return entry
+
+    return None
+
+def hset_value(hash_name, field, value):
+    """Create or update a field inside a hash."""
+    hash_entry = find_hash(hash_name)
+
+    if hash_entry is None:
+        hash_entry = [hash_name, []]
+        hashes.append(hash_entry)
+
+    for entry in hash_entry[1]:
+        if entry[0] == field:
+            entry[1] = value
+            return 0
+
+    hash_entry[1].append([field, value])
+    return 1
+
+def hget_value(hash_name, field):
+    """Retrieve a single field from a hash."""
+    hash_entry = find_hash(hash_name)
+
+    if hash_entry is None:
+        return None
+
+    for entry in hash_entry[1]:
+        if entry[0] == field:
+            return entry[1]
+
+    return None
+
+def hgetall_values(hash_name):
+    """Retrieve all field value pairs from a hash"""
+    hash_entry = find_hash(hash_name)
+
+    if hash_entry is None:
+        return []
+
+    return sorted(hash_entry[1], key=lambda entry: entry[0])
 
 def replay_command(command):
     """Apply a saved command without writing it again."""
@@ -124,6 +175,9 @@ def replay_command(command):
         entry = find_entry(parts[1])
         if entry is not None:
             entry[2] = float(parts[2])
+
+    elif action == "HSET" and len(parts) == 4:
+        hset_value(parts[1], parts[2], parts[3])
 
 def restore_database():
     """Restore ordinary writes and comitted transactions."""
@@ -152,6 +206,7 @@ def main():
 
     transaction_active = False
     transaction_snapshot = []
+    hash_snapshot = []
     pending_commands = []
 
     def record_write(command):
@@ -182,6 +237,7 @@ def main():
 
             else:
                 transaction_snapshot = [entry.copy() for entry in database]
+                hash_snapshot = deepcopy(hashes)
                 
                 pending_commands = []
                 transaction_active = True
@@ -198,6 +254,7 @@ def main():
 
             pending_commands = []
             transaction_snapshot = []
+            hash_snapshot = []
             transaction_active = False
             print("OK")
 
@@ -208,9 +265,11 @@ def main():
                 continue
 
             database[:] = transaction_snapshot
+            hashes[:] = hash_snapshot
 
             pending_commands = []
             transaction_snapshot = []
+            hash_snapshot = []
             transaction_active = False
             print("OK")
      
@@ -252,7 +311,7 @@ def main():
             record_write(" ".join(parts))
             print("OK")
 
-        # MGET: Retrive multiple values
+        # MGET: Retrieve multiple values
         elif action == "MGET" and len(parts) >= 2:
             values = []
 
@@ -288,10 +347,34 @@ def main():
         elif action == "TTL" and len(parts) == 2:
             print(ttl_value(parts[1]))
 
-        # RANGE: Retrive keyts within a alphabetical range
+        # RANGE: Retrieve keyts within a alphabetical range
         elif action == "RANGE" and len(parts) == 3:
             keys = range_values(parts[1], parts[2])
             print(" ".join(keys))
+
+        # HSET: Create or update a hash field
+        elif action == "HSET" and len(parts) == 4:
+            result = hset_value(parts[1], parts[2], parts[3])
+
+            record_write("HSET " + parts[1] + " " + parts[2] + " " + parts[3])
+            print(result)
+
+        # HGET: Retrieve one hash field
+        elif action == "HGET" and len(parts) == 3:
+            result = hget_value(parts[1], parts[2])
+            print(result if result is not None else "NULL")
+
+        # HGETALL: Retrieve every field in a hash
+        elif action == "HGETALL" and len(parts) == 2:
+            fields = hgetall_values(parts[1])
+
+            output = []
+
+            for field, value in fields:
+                output.append(field)
+                output.append(value)
+
+            print(" ".join(output))
 
         # EXIT: Close the database
         elif action == "EXIT":
