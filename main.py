@@ -2,6 +2,7 @@
 # CSCE 4350 - Build a databse
 
 import time
+import json
 
 from storage import save_command, load_commands
 
@@ -17,6 +18,7 @@ def find_entry(key):
 
             if expires_at is not None and time.time() >= expires_at:
                 database.remove(entry)
+                return None
 
             return entry
     
@@ -98,36 +100,67 @@ def range_values(start, end):
     return keys
 
 
+def replay_command(command):
+    """Apply a saved command without writing it again."""
+    parts = command.split()
+
+    if not parts:
+        return
+
+    action = parts[0].upper()
+
+    if action == "SET" and len(parts) == 3:
+        set_value(parts[1], parts[2])
+
+    elif action == "DEL" and len(parts) == 2:
+        delete_value(parts[1])
+
+    elif action == "MSET" and len(parts) >= 3:
+        if (len(parts) - 1) % 2 == 0:
+            for i in range(1, len(parts), 2):
+                set_value(parts[i], parts[i + 1])
+
+    elif action == "EXPIREAT" and len(parts) == 3:
+        entry = find_entry(parts[1])
+        if entry is not None:
+            entry[2] = float(parts[2])
+
 def restore_database():
-    """Rebuild the database from saved commands"""
-
+    """Restore ordinary writes and comitted transactions."""
     for command in load_commands():
-        parts = command.split()
 
-        if not parts:
-            continue
+        if command.startswith("TXN "):
+            try:
+                operations = json.loads(command[4:])
+                
+            except (ValueError, TypeError):
+                continue
 
-        action = parts[0].upper()
+            if not isinstance(operations, list):
+                continue
 
-        if action == "SET" and len(parts) == 3:
-            set_value(parts[1], parts[2])
+            for operation in operations:
+                if isinstance(operation, str):
+                    replay_command(operation)
 
-        elif action == "DEL" and len(parts) == 2:
-            delete_value(parts[1])
-
-        elif action == "MSET" and len(parts) >= 3:
-            if(len(parts) - 1 ) % 2 == 0:
-                for i in range(1, len(parts), 2):
-                    set_value(parts[i], parts[i + 1])
-
-        elif action == "EXPIREAT" and len(parts) == 3:
-            entry = find_entry(parts[1])
-            if entry is not None:
-                entry[2] = float(parts[2])
+        else:
+            replay_command(command)
 
 def main():
     # Restore previously saved information
     restore_database()
+
+    transaction_active = False
+    transaction_snapshot = []
+    pending_commands = []
+
+    def record_write(command):
+        """Queue writes during a transaction, otherwise save."""
+        if transaction_active:
+            pending_commands.append(command)
+
+        else:
+            save_command(command)
 
     while True:
         try:
@@ -142,10 +175,49 @@ def main():
 
         action = parts[0].upper()
 
+        # Start a transaciton
+        if action == "BEGIN" and len(parts) == 1:
+            if transaction_active:
+                print("ERROR")
+
+            else:
+                transaction_snapshot = [entry.copy() for entry in database]
+                
+                pending_commands = []
+                transaction_active = True
+                print("OK")
+
+        # Save a transaction
+        elif action == "COMMIT" and len(parts) == 1:
+            if not transaction_active:
+                print("ERROR")
+                continue
+
+            record = "TXN " + json.dumps(pending_commands)
+            save_command(record)
+
+            pending_commands = []
+            transaction_snapshot = []
+            transaction_active = False
+            print("OK")
+
+        # Cancel a transaction
+        elif action == "ABORT" and len(parts) == 1:
+            if not transaction_active:
+                print("ERROR")
+                continue
+
+            database[:] = transaction_snapshot
+
+            pending_commands = []
+            transaction_snapshot = []
+            transaction_active = False
+            print("OK")
+     
         # SET: store one key-value pair
-        if action == "SET" and len(parts) == 3:
+        elif action == "SET" and len(parts) == 3:
             set_value(parts[1], parts[2])
-            save_command("SET " + parts[1] + " " + parts[2])
+            record_write("SET " + parts[1] + " " + parts[2])
             print("OK")
 
         # GET: Retreive one value
@@ -158,7 +230,7 @@ def main():
             deleted = delete_value(parts[1])
 
             if deleted:
-                save_command("DEL " + parts[1])
+                record_write("DEL " + parts[1])
                 print("1")
 
             else:
@@ -177,7 +249,7 @@ def main():
             for i in range(1, len(parts), 2):
                 set_value(parts[i], parts[ i + 1])
 
-            save_command(" ".join(parts))
+            record_write(" ".join(parts))
             print("OK")
 
         # MGET: Retrive multiple values
@@ -209,7 +281,7 @@ def main():
 
             else:
                 # Save absolute expiration time for restart recovery.
-                save_command("EXPIREAT " + parts[1] + " " + str(expires_at))
+                record_write("EXPIREAT " + parts[1] + " " + str(expires_at))
                 print("1")
 
         # TTL: Check how much time a key has left before expiration
