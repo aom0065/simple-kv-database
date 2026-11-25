@@ -16,6 +16,10 @@ database = []
 # Each hash contains a name and a list of field value pairs
 hashes = []
 
+# Custom list storage using nested lists
+# Each entry contains a key and its list of values
+list_store = []
+
 def find_entry(key):
     """Find a key, removing ut if it has expired."""
     for entry in database:
@@ -151,6 +155,56 @@ def hgetall_values(hash_name):
 
     return sorted(hash_entry[1], key=lambda entry: entry[0])
 
+def find_list(key):
+    """Find a list by its key."""
+    for entry in list_store:
+        if entry[0] == key:
+            return entry
+
+    return None
+
+def push_list(key, value, left=False):
+    """Add a value to the beginning or end of a list."""
+    entry = find_list(key)
+
+    if entry is None:
+        entry = [key, []]
+        list_store.append(entry)
+
+    if left:
+        entry[1].insert(0, value)
+
+    else:
+        entry[1].append(value)
+
+    return len(entry[1])
+
+def lrange_values(key, start, stop):
+    """Retrieve an inclusive range of list elements."""
+    entry = find_list(key)
+
+    if entry is None:
+        return[]
+
+    values = entry[1]
+    length = len(values)
+
+    # Support negative indexes.
+    if start < 0:
+        start += length
+
+    if stop < 0:
+        stop += length
+
+    # Clamp indexes to valid boundaries
+    start = max(0, start)
+    stop = min(length - 1, stop)
+
+    if start > stop:
+        return []
+
+    return values[start:stop + 1]
+
 def replay_command(command):
     """Apply a saved command without writing it again."""
     parts = command.split()
@@ -178,6 +232,12 @@ def replay_command(command):
 
     elif action == "HSET" and len(parts) == 4:
         hset_value(parts[1], parts[2], parts[3])
+
+    elif action == "LPUSH" and len(parts) == 3:
+        push_list(parts[1], parts[2], left=True)
+
+    elif action == "RPUSH" and len(parts) == 3:
+        push_list(parts[1], parts[2], left=False)
 
 def restore_database():
     """Restore ordinary writes and comitted transactions."""
@@ -207,6 +267,7 @@ def main():
     transaction_active = False
     transaction_snapshot = []
     hash_snapshot = []
+    list_snapshot = []
     pending_commands = []
 
     def record_write(command):
@@ -236,8 +297,9 @@ def main():
                 print("ERROR")
 
             else:
-                transaction_snapshot = [entry.copy() for entry in database]
+                transaction_snapshot = deepcopy(database)
                 hash_snapshot = deepcopy(hashes)
+                list_snapshot = deepcopy(list_store)
                 
                 pending_commands = []
                 transaction_active = True
@@ -255,6 +317,7 @@ def main():
             pending_commands = []
             transaction_snapshot = []
             hash_snapshot = []
+            list_snapshot = []
             transaction_active = False
             print("OK")
 
@@ -266,10 +329,12 @@ def main():
 
             database[:] = transaction_snapshot
             hashes[:] = hash_snapshot
+            list_store[:] = list_snapshot
 
             pending_commands = []
             transaction_snapshot = []
             hash_snapshot = []
+            list_snapshot = []
             transaction_active = False
             print("OK")
      
@@ -375,6 +440,30 @@ def main():
                 output.append(value)
 
             print(" ".join(output))
+
+        # LPUSH: Add a value to the front of a list
+        elif action == "LPUSH" and len(parts) == 3:
+            length = push_list(parts[1], parts[2], left=True)
+            record_write("LPUSH " + parts[1] + " " + parts[2])
+            print(length)
+
+        # RPUSH: Add a value to the end of a list
+        elif action == "RPUSH" and len(parts) == 3:
+            length = push_list(parts[1], parts[2], left=False)
+            record_write("RPUSH " + parts[1]+ " " + parts[2])
+            print(length)
+
+        # LRANGE: Retrieve elements from a list
+        elif action == "LRANGE" and len(parts) == 4:
+            try:
+                start = int(parts[2])
+                stop = int(parts[3])
+            except ValueError:
+                print("ERROR")
+                continue
+
+            values = lrange_values(parts[1], start, stop)
+            print(" ".join(values))
 
         # EXIT: Close the database
         elif action == "EXIT":
