@@ -205,6 +205,33 @@ def lrange_values(key, start, stop):
 
     return values[start:stop + 1]
 
+def change_counter(key, amount):
+    """Increase or decrese a numeric key."""
+    entry = find_entry(key)
+
+    # Missing keys start at zero
+    if entry is None:
+        new_value = amount
+
+    else:
+        try:
+            current_value = int(entry[1])
+        except (ValueError, TypeError):
+            return None
+
+        new_value = current_value + amount
+
+    # Reuse SET logic so the new value is stored
+    set_value(key, str(new_value))
+
+    return new_value
+
+def flush_database():
+    """Remove all keys, hashes, and lists."""
+    database.clear()
+    hashes.clear()
+    list_store.clear()
+
 def replay_command(command):
     """Apply a saved command without writing it again."""
     parts = command.split()
@@ -238,6 +265,16 @@ def replay_command(command):
 
     elif action == "RPUSH" and len(parts) == 3:
         push_list(parts[1], parts[2], left=False)
+
+    elif action == "INCR" and len(parts) == 2:
+        change_counter(parts[1], 1)
+
+    elif action == "DECR" and len(parts) == 2:
+        change_counter(parts[1], -1)
+
+    elif action == "FLUSHDB" and len(parts) == 1:
+        flush_database
+ 
 
 def restore_database():
     """Restore ordinary writes and comitted transactions."""
@@ -464,6 +501,35 @@ def main():
 
             values = lrange_values(parts[1], start, stop)
             print(" ".join(values))
+
+        # INCR: Increase a numeric value by one
+        elif action == "INCR" and len(parts) == 2:
+            result = change_counter(parts[1], 1)
+
+            if result is None:
+                print("ERROR")
+
+            else:
+                record_write("INCR " + parts[1])
+                print(result)
+
+        #DECR: Decrease a numeric value by one
+        elif action == "DECR" and len(parts) == 2:
+            result = change_counter(parts[1], -1)
+
+            if result is None:
+                print("ERROR")
+
+            else:
+                record_write("DECR " + parts[1])
+                print(result)
+
+        # FLUSHDB: Clear the entire datbase
+        elif action == "FLUSHDB" and len(parts) == 1:
+            flush_database()
+            record_write("FLUSHDB")
+            print("OK")
+            
 
         # EXIT: Close the database
         elif action == "EXIT":
